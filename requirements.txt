@@ -1,0 +1,14 @@
+numpy
+pandas
+matplotlib
+xarray
+zarr
+rioxarray
+rasterio
+geopandas
+shapely
+pyproj
+pystac-client
+odc-stac
+dask[distributed]
+tensorflow

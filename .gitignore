@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Local config and secrets
+.env
+.env.*
+*.local
+
+# macOS / editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Workflow outputs and large local data
+outputs/
+output/
+data/
+tmp/
+*.zarr/
+*.tif
+*.tiff
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.gpkg
+*.geojson
+*.csv
+*.png
+*.mp4
+
+# Keep source code, bundled models, docs, and licenses tracked.
+!src/
+!src/**/*.py
+!src/fractional_cover_models/
+!src/fractional_cover_models/*.tflite
+!README.md
+!requirements.txt
+!LICENSES/
+!LICENSES/**

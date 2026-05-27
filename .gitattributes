@@ -1,0 +1,5 @@
+*.tflite binary
+*.zarr/** binary
+*.tif binary
+*.tiff binary
+*.gpkg binary
