@@ -9,7 +9,7 @@ import pystac_client
 import xarray as xr
 from dask.distributed import Client as DaskClient
 
-from io_utils import ensure_dir, get_bbox_from_raster
+from io_utils import ensure_dir, get_bbox_from_raster, get_bbox_from_vector
 
 odc.stac.configure_rio(cloud_defaults=True, aws={"aws_unsigned": True})
 
@@ -37,10 +37,12 @@ def compute_ndvi(ds: xr.Dataset) -> xr.DataArray:
 
 
 def download_ndvi(
-    aoi_raster: str,
+    aoi_raster: str | None,
     start: str,
     end: str,
     out_zarr: str,
+    aoi_vector: str | None = None,
+    aoi_buffer_m: float = 0.0,
     out_crs: str = "EPSG:6933",
     resolution: int = 10,
     max_cloud_cover: float = 40.0,
@@ -52,7 +54,13 @@ def download_ndvi(
     threads_per_worker: int = 2,
     keep_source_bands: bool = False,
 ) -> Path:
-    bbox = get_bbox_from_raster(aoi_raster, out_crs="EPSG:4326")
+    if aoi_raster:
+        bbox = get_bbox_from_raster(aoi_raster, out_crs="EPSG:4326")
+    elif aoi_vector:
+        bbox = get_bbox_from_vector(aoi_vector, out_crs="EPSG:4326", buffer_m=aoi_buffer_m, buffer_crs=out_crs)
+    else:
+        raise ValueError("Either aoi_raster or aoi_vector must be provided.")
+
     out_zarr = Path(out_zarr)
     ensure_dir(out_zarr.parent)
 
@@ -97,7 +105,9 @@ def download_ndvi(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download Sentinel-2 NDVI time series from DEA STAC.")
-    parser.add_argument("--aoi-raster", required=True, help="Raster defining the overall AOI extent, e.g. DEM.")
+    parser.add_argument("--aoi-raster", help="Raster defining the overall AOI extent, e.g. DEM.")
+    parser.add_argument("--aoi-vector", help="Vector defining the AOI extent when no raster is provided.")
+    parser.add_argument("--aoi-buffer-m", type=float, default=0.0, help="Buffer in metres around --aoi-vector for the download extent.")
     parser.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     parser.add_argument("--out-zarr", required=True, help="Output Zarr path for the NDVI time series")
@@ -114,6 +124,8 @@ if __name__ == "__main__":
 
     out = download_ndvi(
         aoi_raster=args.aoi_raster,
+        aoi_vector=args.aoi_vector,
+        aoi_buffer_m=args.aoi_buffer_m,
         start=args.start,
         end=args.end,
         out_zarr=args.out_zarr,

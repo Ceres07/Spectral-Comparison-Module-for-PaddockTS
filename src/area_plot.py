@@ -11,14 +11,15 @@ import rioxarray  # noqa: F401
 import xarray as xr
 from rasterio.plot import plotting_extent
 
-from io_utils import ensure_dir, polygon_to_bool_mask, raster_to_bool_mask, read_vector
+from io_utils import buffered_polygon_to_bool_mask, ensure_dir, polygon_to_bool_mask, raster_to_bool_mask, read_vector
 
 
 def plot_comparison_areas(
     ndvi_zarr: str | Path,
-    boolean_raster: str | Path,
     target_polygon: str | Path,
     out_png: str | Path,
+    boolean_raster: str | Path | None = None,
+    buffer_m: float | None = None,
     include_values: tuple[int | float, ...] = (1,),
     all_touched: bool = False,
 ) -> None:
@@ -30,14 +31,30 @@ def plot_comparison_areas(
     transform = ref.rio.transform()
     crs = ref.rio.crs
 
-    mask_bool = raster_to_bool_mask(
-        raster_path=boolean_raster,
-        reference_transform=transform,
-        width=width,
-        height=height,
-        reference_crs=crs,
-        include_values=include_values,
-    )
+    if boolean_raster:
+        mask_bool = raster_to_bool_mask(
+            raster_path=boolean_raster,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            include_values=include_values,
+        )
+        mask_label = "Boolean raster only"
+    elif buffer_m is not None:
+        mask_bool = buffered_polygon_to_bool_mask(
+            vector_path=target_polygon,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            buffer_m=buffer_m,
+            all_touched=all_touched,
+        )
+        mask_label = "Buffer area only"
+    else:
+        raise ValueError("Either boolean_raster or buffer_m must be provided.")
+
     poly_bool = polygon_to_bool_mask(
         vector_path=target_polygon,
         reference_transform=transform,
@@ -64,7 +81,7 @@ def plot_comparison_areas(
     gdf.boundary.plot(ax=ax, color="#1f1f1f", linewidth=1.5)
 
     handles = [
-        mpatches.Patch(color="#e0a23a", label="Boolean raster only"),
+        mpatches.Patch(color="#e0a23a", label=mask_label),
         mpatches.Patch(color="#4c78a8", label="Target polygon only"),
         mpatches.Patch(color="#3a9f68", label="Overlap"),
     ]
@@ -84,9 +101,10 @@ def plot_comparison_areas(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot the compared mask, polygon, and overlap areas.")
     parser.add_argument("--ndvi-zarr", required=True)
-    parser.add_argument("--boolean-raster", required=True)
     parser.add_argument("--target-polygon", required=True)
     parser.add_argument("--out-png", required=True)
+    parser.add_argument("--boolean-raster")
+    parser.add_argument("--buffer-m", type=float)
     parser.add_argument("--include-values", nargs="+", default=[1])
     parser.add_argument("--all-touched", action="store_true")
     args = parser.parse_args()
@@ -94,9 +112,10 @@ if __name__ == "__main__":
     parsed_values = tuple(float(v) if "." in str(v) else int(v) for v in args.include_values)
     plot_comparison_areas(
         ndvi_zarr=args.ndvi_zarr,
-        boolean_raster=args.boolean_raster,
         target_polygon=args.target_polygon,
         out_png=args.out_png,
+        boolean_raster=args.boolean_raster,
+        buffer_m=args.buffer_m,
         include_values=parsed_values,
         all_touched=args.all_touched,
     )

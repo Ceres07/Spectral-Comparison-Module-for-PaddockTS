@@ -15,7 +15,7 @@ import pandas as pd
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from io_utils import ensure_dir, polygon_to_bool_mask, raster_to_bool_mask
+from io_utils import buffered_polygon_to_bool_mask, ensure_dir, polygon_to_bool_mask, raster_to_bool_mask
 
 
 FC_BANDS = ("nbart_blue", "nbart_green", "nbart_red", "nbart_nir_1", "nbart_swir_2", "nbart_swir_3")
@@ -138,6 +138,7 @@ def summarise_fractional_cover_group(fc_ds: xr.Dataset, bool_mask: np.ndarray, l
             valid_count = max(valid_count, int(values.size))
             record[f"mean_{band}"] = float(np.nanmean(values)) if values.size else np.nan
             record[f"median_{band}"] = float(np.nanmedian(values)) if values.size else np.nan
+            record[f"std_{band}"] = float(np.nanstd(values)) if values.size else np.nan
             record[f"p25_{band}"] = float(np.nanpercentile(values, 25)) if values.size else np.nan
             record[f"p75_{band}"] = float(np.nanpercentile(values, 75)) if values.size else np.nan
         record["n_pixels"] = valid_count
@@ -166,9 +167,10 @@ def plot_fractional_cover(summary_df: pd.DataFrame, out_png: str | Path) -> None
 
 def summarise_fractional_cover(
     fractional_cover_zarr: str | Path,
-    boolean_raster: str | Path,
     target_polygon: str | Path,
     outdir: str | Path,
+    boolean_raster: str | Path | None = None,
+    buffer_m: float | None = None,
     include_values: tuple[int | float, ...] = (1,),
     all_touched: bool = False,
 ) -> None:
@@ -181,14 +183,30 @@ def summarise_fractional_cover(
     transform = ref.rio.transform()
     crs = ref.rio.crs
 
-    mask_bool = raster_to_bool_mask(
-        raster_path=boolean_raster,
-        reference_transform=transform,
-        width=width,
-        height=height,
-        reference_crs=crs,
-        include_values=include_values,
-    )
+    if boolean_raster:
+        mask_bool = raster_to_bool_mask(
+            raster_path=boolean_raster,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            include_values=include_values,
+        )
+        mask_label = "boolean_mask_eq_1"
+    elif buffer_m is not None:
+        mask_bool = buffered_polygon_to_bool_mask(
+            vector_path=target_polygon,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            buffer_m=buffer_m,
+            all_touched=all_touched,
+        )
+        mask_label = "buffer_area"
+    else:
+        raise ValueError("Either boolean_raster or buffer_m must be provided.")
+
     poly_bool = polygon_to_bool_mask(
         vector_path=target_polygon,
         reference_transform=transform,
@@ -200,7 +218,7 @@ def summarise_fractional_cover(
 
     summary = pd.concat(
         [
-            summarise_fractional_cover_group(fc_ds, mask_bool, "boolean_mask_eq_1"),
+            summarise_fractional_cover_group(fc_ds, mask_bool, mask_label),
             summarise_fractional_cover_group(fc_ds, poly_bool, "target_polygon"),
             summarise_fractional_cover_group(fc_ds, mask_bool & poly_bool, "mask_and_polygon_overlap"),
         ],
@@ -210,8 +228,9 @@ def summarise_fractional_cover(
 
     wide = summary.pivot(index="date", columns="group", values=["mean_bg", "mean_pv", "mean_npv"])
     wide.columns = [f"{metric}_{group}" for metric, group in wide.columns]
-    if "mean_pv_boolean_mask_eq_1" in wide and "mean_pv_target_polygon" in wide:
-        wide["mean_pv_diff_mask_minus_polygon"] = wide["mean_pv_boolean_mask_eq_1"] - wide["mean_pv_target_polygon"]
+    mask_mean_col = f"mean_pv_{mask_label}"
+    if mask_mean_col in wide and "mean_pv_target_polygon" in wide:
+        wide["mean_pv_diff_mask_minus_polygon"] = wide[mask_mean_col] - wide["mean_pv_target_polygon"]
     wide.reset_index().to_csv(outdir / "fractional_cover_mean_difference_timeseries.csv", index=False)
 
     plot_fractional_cover(summary, outdir / "fractional_cover_comparison.png")
@@ -222,6 +241,7 @@ if __name__ == "__main__":
     parser.add_argument("--sentinel2-zarr", required=True, help="Zarr containing the six source Sentinel-2 bands")
     parser.add_argument("--out-zarr", required=True, help="Output fractional-cover Zarr path")
     parser.add_argument("--boolean-raster")
+    parser.add_argument("--buffer-m", type=float)
     parser.add_argument("--target-polygon")
     parser.add_argument("--outdir")
     parser.add_argument("--include-values", nargs="+", default=[1], help="Raster values to treat as TRUE")
@@ -236,15 +256,16 @@ if __name__ == "__main__":
         model_n=args.model_n,
         correction=args.correction,
     )
-    if args.boolean_raster or args.target_polygon or args.outdir:
-        if not (args.boolean_raster and args.target_polygon and args.outdir):
-            raise ValueError("--boolean-raster, --target-polygon, and --outdir are required when summarising")
+    if args.boolean_raster or args.buffer_m is not None or args.target_polygon or args.outdir:
+        if not (args.target_polygon and args.outdir and (args.boolean_raster or args.buffer_m is not None)):
+            raise ValueError("--target-polygon, --outdir, and either --boolean-raster or --buffer-m are required when summarising")
         parsed_values = tuple(float(v) if "." in str(v) else int(v) for v in args.include_values)
         summarise_fractional_cover(
             fractional_cover_zarr=out,
-            boolean_raster=args.boolean_raster,
             target_polygon=args.target_polygon,
             outdir=args.outdir,
+            boolean_raster=args.boolean_raster,
+            buffer_m=args.buffer_m,
             include_values=parsed_values,
             all_touched=args.all_touched,
         )

@@ -52,6 +52,21 @@ def get_bbox_from_raster(raster_path: str | Path, out_crs: str = "EPSG:4326") ->
     return [min(tx), min(ty), max(tx), max(ty)]
 
 
+def get_bbox_from_vector(
+    vector_path: str | Path,
+    out_crs: str = "EPSG:4326",
+    buffer_m: float = 0.0,
+    buffer_crs: str = "EPSG:6933",
+) -> list[float]:
+    gdf = read_vector(vector_path).to_crs(buffer_crs)
+    if buffer_m:
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf.geometry.buffer(buffer_m)
+    gdf = gdf.to_crs(out_crs)
+    minx, miny, maxx, maxy = gdf.total_bounds
+    return [float(minx), float(miny), float(maxx), float(maxy)]
+
+
 def raster_footprint_gdf(raster_path: str | Path) -> gpd.GeoDataFrame:
     with rasterio.open(raster_path) as src:
         geom = box(*src.bounds)
@@ -90,6 +105,32 @@ def raster_to_bool_mask(
         )
 
     return np.isin(destination, include_values)
+
+
+def buffered_polygon_to_bool_mask(
+    vector_path: str | Path,
+    reference_transform,
+    width: int,
+    height: int,
+    reference_crs,
+    buffer_m: float,
+    all_touched: bool = False,
+    default_crs: str = "EPSG:4326",
+) -> np.ndarray:
+    gdf = read_vector(vector_path, default_crs=default_crs).to_crs(reference_crs)
+    gdf = gdf.copy()
+    gdf["geometry"] = gdf.geometry.buffer(buffer_m)
+    shapes = ((geom, 1) for geom in gdf.geometry if geom is not None and not geom.is_empty)
+    mask = rasterize(
+        shapes=shapes,
+        out_shape=(height, width),
+        transform=reference_transform,
+        fill=0,
+        default_value=1,
+        dtype="uint8",
+        all_touched=all_touched,
+    )
+    return mask == 1
 
 
 def polygon_to_bool_mask(

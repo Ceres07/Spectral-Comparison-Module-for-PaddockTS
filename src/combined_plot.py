@@ -13,6 +13,12 @@ FC_COLORS = {
     "mean_pv": "#2f8f45",
     "mean_npv": "#7d78b8",
 }
+FC_LABELS = {
+    "bg": "Bare ground",
+    "pv": "Green vegetation",
+    "npv": "Non-green vegetation",
+}
+DEFAULT_COMPARISON_GROUP = "boolean_mask_eq_1"
 
 
 def _select_group(df: pd.DataFrame, group: str) -> pd.DataFrame:
@@ -36,22 +42,89 @@ def _read_rainfall(rainfall_csv: str | Path) -> pd.DataFrame:
     return rainfall.sort_values("date")
 
 
+def _relative_deviation(
+    target_values: pd.Series,
+    comparison_mean: pd.Series,
+    comparison_std: pd.Series,
+) -> pd.Series:
+    comparison_std = comparison_std.replace(0, np.nan)
+    return (target_values - comparison_mean) / comparison_std
+
+
+def _merge_target_comparison(df: pd.DataFrame, target_group: str, comparison_group: str) -> pd.DataFrame:
+    target = _select_group(df, target_group)
+    comparison = _select_group(df, comparison_group)
+    merged = pd.merge(target, comparison, on="date", how="inner", suffixes=("_target", "_comparison"))
+    if merged.empty:
+        raise ValueError(f"{target_group!r} and {comparison_group!r} have no dates in common.")
+    return merged
+
+
+def _require_columns(df: pd.DataFrame, columns: list[str], source_name: str) -> None:
+    missing = [column for column in columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"{source_name} is missing required columns for relative_quantile: {', '.join(missing)}")
+
+
+def _plot_relative_quantile(
+    ax,
+    dates: pd.Series,
+    df: pd.DataFrame,
+    metric: str,
+    label: str,
+    color: str,
+) -> None:
+    mean_target = f"mean_{metric}_target"
+    mean_comparison = f"mean_{metric}_comparison"
+    std_comparison = f"std_{metric}_comparison"
+    p25_target = f"p25_{metric}_target"
+    p75_target = f"p75_{metric}_target"
+    _require_columns(df, [mean_target, mean_comparison, std_comparison], label)
+
+    mean_rel = _relative_deviation(df[mean_target], df[mean_comparison], df[std_comparison])
+    ax.plot(dates, mean_rel, color=color, linewidth=2.0, label=label)
+
+    if p25_target in df.columns and p75_target in df.columns:
+        p25_rel = _relative_deviation(df[p25_target], df[mean_comparison], df[std_comparison])
+        p75_rel = _relative_deviation(df[p75_target], df[mean_comparison], df[std_comparison])
+        ax.fill_between(dates, p25_rel, p75_rel, color=color, alpha=0.18)
+
+
 def plot_combined_vegetation_rainfall(
     ndvi_summary_csv: str | Path,
     fractional_cover_summary_csv: str | Path,
     out_png: str | Path,
     rainfall_csv: str | Path | None = None,
     group: str = "target_polygon",
+    comparison_group: str = DEFAULT_COMPARISON_GROUP,
+    plot_method: str = "absolute",
 ) -> None:
-    ndvi = _select_group(pd.read_csv(ndvi_summary_csv), group)
-    fc = _select_group(pd.read_csv(fractional_cover_summary_csv), group)
+    if plot_method not in {"absolute", "relative_quantile"}:
+        raise ValueError("plot_method must be 'absolute' or 'relative_quantile'")
 
-    merged = pd.merge(
-        ndvi[["date", "mean_ndvi"]],
-        fc[["date", "mean_bg", "mean_pv", "mean_npv"]],
-        on="date",
-        how="inner",
-    )
+    ndvi_all = pd.read_csv(ndvi_summary_csv)
+    fc_all = pd.read_csv(fractional_cover_summary_csv)
+    ndvi = _select_group(ndvi_all, group)
+    fc = _select_group(fc_all, group)
+
+    ndvi_cols = [col for col in ["date", "mean_ndvi", "p25_ndvi", "p75_ndvi"] if col in ndvi.columns]
+    fc_cols = [
+        col
+        for col in [
+            "date",
+            "mean_bg",
+            "p25_bg",
+            "p75_bg",
+            "mean_pv",
+            "p25_pv",
+            "p75_pv",
+            "mean_npv",
+            "p25_npv",
+            "p75_npv",
+        ]
+        if col in fc.columns
+    ]
+    merged = pd.merge(ndvi[ndvi_cols], fc[fc_cols], on="date", how="inner")
     if merged.empty:
         raise ValueError("NDVI and fractional-cover summaries have no dates in common.")
 
@@ -82,26 +155,58 @@ def plot_combined_vegetation_rainfall(
         )
         rain_ax = None
 
-    ndvi_ax.plot(merged["date"], merged["mean_ndvi"], color="#111111", linewidth=2.1, label="NDVI")
-    ndvi_ax.set_ylim(-0.1, 1)
-    ndvi_ax.set_ylabel("NDVI")
-    ndvi_ax.legend(loc="upper left")
-    ndvi_ax.grid(axis="y", alpha=0.25)
-    ndvi_ax.set_title(f"Vegetation fractions, NDVI, and rainfall: {group}")
+    if plot_method == "relative_quantile":
+        ndvi_relative = _merge_target_comparison(ndvi_all, group, comparison_group)
+        fc_relative = _merge_target_comparison(fc_all, group, comparison_group)
 
-    veg_ax.stackplot(
-        merged["date"],
-        fc_props["mean_bg"],
-        fc_props["mean_pv"],
-        fc_props["mean_npv"],
-        labels=["Bare ground", "Green vegetation", "Non-green vegetation"],
-        colors=[FC_COLORS["mean_bg"], FC_COLORS["mean_pv"], FC_COLORS["mean_npv"]],
-        alpha=0.72,
-    )
-    veg_ax.set_ylim(0, 1)
-    veg_ax.set_ylabel("Fractional cover proportion")
-    veg_ax.legend(loc="upper left", ncols=3)
-    veg_ax.grid(axis="y", alpha=0.25)
+        _plot_relative_quantile(
+            ndvi_ax,
+            ndvi_relative["date"],
+            ndvi_relative,
+            metric="ndvi",
+            label="NDVI",
+            color="#111111",
+        )
+        ndvi_ax.axhline(0, color="#777777", linewidth=0.9)
+        ndvi_ax.set_ylabel("Relative deviation")
+        ndvi_ax.legend(loc="upper left")
+        ndvi_ax.grid(axis="y", alpha=0.25)
+        ndvi_ax.set_title(f"Target minus comparison, in comparison standard deviations: {group} vs {comparison_group}")
+
+        for key in ("bg", "pv", "npv"):
+            _plot_relative_quantile(
+                veg_ax,
+                fc_relative["date"],
+                fc_relative,
+                metric=key,
+                label=FC_LABELS[key],
+                color=FC_COLORS[f"mean_{key}"],
+            )
+        veg_ax.axhline(0, color="#777777", linewidth=0.9)
+        veg_ax.set_ylabel("Relative deviation")
+        veg_ax.legend(loc="upper left", ncols=3)
+        veg_ax.grid(axis="y", alpha=0.25)
+    else:
+        ndvi_ax.plot(merged["date"], merged["mean_ndvi"], color="#111111", linewidth=2.1, label="NDVI")
+        ndvi_ax.set_ylim(-0.1, 1)
+        ndvi_ax.set_ylabel("NDVI")
+        ndvi_ax.legend(loc="upper left")
+        ndvi_ax.grid(axis="y", alpha=0.25)
+        ndvi_ax.set_title(f"Vegetation fractions, NDVI, and rainfall: {group}")
+
+        veg_ax.stackplot(
+            merged["date"],
+            fc_props["mean_bg"],
+            fc_props["mean_pv"],
+            fc_props["mean_npv"],
+            labels=[FC_LABELS["bg"], FC_LABELS["pv"], FC_LABELS["npv"]],
+            colors=[FC_COLORS["mean_bg"], FC_COLORS["mean_pv"], FC_COLORS["mean_npv"]],
+            alpha=0.72,
+        )
+        veg_ax.set_ylim(0, 1)
+        veg_ax.set_ylabel("Fractional cover proportion")
+        veg_ax.legend(loc="upper left", ncols=3)
+        veg_ax.grid(axis="y", alpha=0.25)
 
     if has_rainfall and rain_ax is not None and rainfall is not None:
         rain_ax.bar(rainfall["date"], rainfall["daily_rain"], width=1.0, color="#4f85c5", alpha=0.65)
@@ -123,6 +228,8 @@ if __name__ == "__main__":
     parser.add_argument("--out-png", required=True)
     parser.add_argument("--rainfall-csv")
     parser.add_argument("--group", default="target_polygon")
+    parser.add_argument("--comparison-group", default=DEFAULT_COMPARISON_GROUP)
+    parser.add_argument("--plot-method", choices=("absolute", "relative_quantile"), default="absolute")
     args = parser.parse_args()
 
     plot_combined_vegetation_rainfall(
@@ -131,5 +238,7 @@ if __name__ == "__main__":
         rainfall_csv=args.rainfall_csv,
         out_png=args.out_png,
         group=args.group,
+        comparison_group=args.comparison_group,
+        plot_method=args.plot_method,
     )
     print(f"Saved combined plot to: {args.out_png}")

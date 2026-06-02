@@ -9,7 +9,7 @@ import pandas as pd
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from io_utils import ensure_dir, polygon_to_bool_mask, raster_to_bool_mask
+from io_utils import buffered_polygon_to_bool_mask, ensure_dir, polygon_to_bool_mask, raster_to_bool_mask
 
 
 def summarise_group(values_2d: np.ndarray, times: np.ndarray, label: str) -> pd.DataFrame:
@@ -67,9 +67,10 @@ def plot_timeseries(summary_df: pd.DataFrame, out_png: str | Path) -> None:
 
 def compare_ndvi(
     ndvi_zarr: str,
-    boolean_raster: str,
     target_polygon: str,
     outdir: str,
+    boolean_raster: str | None = None,
+    buffer_m: float | None = None,
     include_values: tuple[int | float, ...] = (1,),
     save_pixel_values: bool = False,
     all_touched: bool = False,
@@ -83,14 +84,30 @@ def compare_ndvi(
     transform = ndvi.rio.transform()
     crs = ndvi.rio.crs
 
-    mask_bool = raster_to_bool_mask(
-        raster_path=boolean_raster,
-        reference_transform=transform,
-        width=width,
-        height=height,
-        reference_crs=crs,
-        include_values=include_values,
-    )
+    if boolean_raster:
+        mask_bool = raster_to_bool_mask(
+            raster_path=boolean_raster,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            include_values=include_values,
+        )
+        mask_label = "boolean_mask_eq_1"
+    elif buffer_m is not None:
+        mask_bool = buffered_polygon_to_bool_mask(
+            vector_path=target_polygon,
+            reference_transform=transform,
+            width=width,
+            height=height,
+            reference_crs=crs,
+            buffer_m=buffer_m,
+            all_touched=all_touched,
+        )
+        mask_label = "buffer_area"
+    else:
+        raise ValueError("Either boolean_raster or buffer_m must be provided.")
+
     poly_bool = polygon_to_bool_mask(
         vector_path=target_polygon,
         reference_transform=transform,
@@ -109,7 +126,7 @@ def compare_ndvi(
 
     summary = pd.concat(
         [
-            summarise_group(mask_pixels, times, "boolean_mask_eq_1"),
+            summarise_group(mask_pixels, times, mask_label),
             summarise_group(poly_pixels, times, "target_polygon"),
             summarise_group(overlap_pixels, times, "mask_and_polygon_overlap"),
         ],
@@ -119,8 +136,8 @@ def compare_ndvi(
 
     # Difference table: mask minus polygon means.
     wide = summary.pivot(index="date", columns="group", values="mean_ndvi").reset_index()
-    if {"boolean_mask_eq_1", "target_polygon"}.issubset(wide.columns):
-        wide["mean_ndvi_diff_mask_minus_polygon"] = wide["boolean_mask_eq_1"] - wide["target_polygon"]
+    if {mask_label, "target_polygon"}.issubset(wide.columns):
+        wide["mean_ndvi_diff_mask_minus_polygon"] = wide[mask_label] - wide["target_polygon"]
     wide.to_csv(outdir / "ndvi_mean_difference_timeseries.csv", index=False)
 
     plot_timeseries(summary_df=summary[summary["group"] != "mask_and_polygon_overlap"], out_png=outdir / "ndvi_comparison.png")
@@ -130,7 +147,7 @@ def compare_ndvi(
     overlap_count = int((mask_bool & poly_bool).sum())
     pd.DataFrame(
         {
-            "group": ["boolean_mask_eq_1", "target_polygon", "mask_and_polygon_overlap"],
+            "group": [mask_label, "target_polygon", "mask_and_polygon_overlap"],
             "n_pixels": [mask_count, poly_count, overlap_count],
         }
     ).to_csv(outdir / "pixel_counts.csv", index=False)
@@ -138,7 +155,7 @@ def compare_ndvi(
     if save_pixel_values:
         records = []
         for label, bool_mask in [
-            ("boolean_mask_eq_1", mask_bool),
+            (mask_label, mask_bool),
             ("target_polygon", poly_bool),
             ("mask_and_polygon_overlap", mask_bool & poly_bool),
         ]:
@@ -164,9 +181,10 @@ def compare_ndvi(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract and compare NDVI values for a boolean raster and a target polygon.")
     parser.add_argument("--ndvi-zarr", required=True)
-    parser.add_argument("--boolean-raster", required=True)
     parser.add_argument("--target-polygon", required=True)
     parser.add_argument("--outdir", required=True)
+    parser.add_argument("--boolean-raster")
+    parser.add_argument("--buffer-m", type=float)
     parser.add_argument("--include-values", nargs="+", default=[1], help="Raster values to treat as TRUE in the boolean raster")
     parser.add_argument("--save-pixel-values", action="store_true")
     parser.add_argument("--all-touched", action="store_true")
@@ -175,9 +193,10 @@ if __name__ == "__main__":
     parsed_values = tuple(float(v) if "." in str(v) else int(v) for v in args.include_values)
     compare_ndvi(
         ndvi_zarr=args.ndvi_zarr,
-        boolean_raster=args.boolean_raster,
         target_polygon=args.target_polygon,
         outdir=args.outdir,
+        boolean_raster=args.boolean_raster,
+        buffer_m=args.buffer_m,
         include_values=parsed_values,
         save_pixel_values=args.save_pixel_values,
         all_touched=args.all_touched,
